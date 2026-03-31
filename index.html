@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>KLGA Near Real-Time Weather</title>
+  
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 22px; line-height: 1.35; }
+
+    header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+    h1 { font-size: 20px; margin: 0; }
+    .meta { font-size: 13px; opacity: 0.82; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid rgba(127,127,127,0.35); font-size:12px; opacity:0.95; margin-left:8px; }
+
+    .grid { display:grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap:12px; margin-top:14px; }
+    .card { border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; padding: 12px; }
+    .label { font-size: 12px; opacity: 0.7; }
+    .value { font-size: 18px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .sub { font-size: 12px; opacity: 0.75; margin-top: 6px; }
+
+    .wide { grid-column: 1 / -1; }
+    button { border-radius: 10px; padding: 10px 12px; border: 1px solid rgba(127,127,127,0.35); background: transparent; cursor: pointer; }
+    button:hover { border-color: rgba(127,127,127,0.6); }
+    .ok { color: #1b7f2a; }
+    .bad { color: #b42318; }
+
+    .chart-container { position: relative; height: 450px; width: 100%; margin-top: 12px; }
+
+    table { border-collapse: collapse; width: 100%; min-width: 1050px; }
+    th, td { padding: 8px; border-bottom: 1px solid rgba(127,127,127,0.12); vertical-align: top; text-align: left; }
+    thead th { border-bottom: 1px solid rgba(127,127,127,0.25); position: sticky; top: 0; background: rgba(0,0,0,0.06); backdrop-filter: blur(6px); }
+
+    .tableWrap { overflow: auto; border: 1px solid rgba(127,127,127,0.2); border-radius: 10px; height: calc(100vh - 320px); min-height: 360px; }
+
+    tr.mark-hour td { background: rgba(80, 140, 255, 0.22); font-weight: 750; font-size: 13.6px; }
+    tr.mark-half td { background: rgba(80, 140, 255, 0.12); font-weight: 650; font-size: 13.2px; }
+    tr.mark-official td { outline: 2px solid rgba(255, 215, 90, 0.55); outline-offset: -2px; }
+    tr.day-sep td { padding: 10px 8px; font-weight: 800; border-top: 2px solid rgba(127,127,127,0.35); border-bottom: 1px solid rgba(127,127,127,0.18); background: rgba(0,0,0,0.10); }
+
+    .tempWrap { display:flex; align-items:baseline; gap:8px; }
+    .trend { font-weight: 800; width: 14px; display:inline-block; text-align:center; }
+    .trend-up { color: #1b7f2a; }
+    .trend-down { color: #b42318; }
+    .trend-flat { opacity: 0.7; }
+    .delta { font-size: 12px; opacity: 0.75; margin-left: 4px; }
+
+    @media (max-width: 760px) {
+      body { margin: 12px; }
+      header { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-top: 18px; }
+      .wide { grid-column: 1 / -1; }
+      .chart-container { height: 350px; }
+      .tableWrap { height: 60vh; min-height: 400px; -webkit-overflow-scrolling: touch; margin-top: 16px; }
+      table { min-width: 850px; } 
+      h1 { font-size: 18px; }
+      .value { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>
+        KLGA Near Real-Time Weather
+        <span class="badge" id="stationBadge">Station: —</span>
+        <span class="badge" id="feedBadge">Feed: —</span>
+      </h1>
+      <div class="meta">
+        Table refresh: <span id="every">5</span> min · Forecast refresh: <span id="everyPred">1</span> min ·
+        Last fetch: <span id="lastFetch">—</span> · Next: <span id="nextFetch">—</span> ·
+        Obs time (Eastern): <span id="obsCt">—</span> · Age: <span id="age">—</span> ·
+        Status: <span id="status">—</span>
+      </div>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <button id="refreshBtn">Refresh now</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="label">Wind</div><div class="value" id="wind">—</div></div>
+    <div class="card"><div class="label">Temperature</div><div class="value" id="temp">—</div></div>
+    <div class="card"><div class="label">Altimeter</div><div class="value" id="alt">—</div></div>
+
+    <div class="card"><div class="label">Visibility</div><div class="value" id="vis">—</div></div>
+    <div class="card"><div class="label">Dew point</div><div class="value" id="dew">—</div></div>
+    <div class="card"><div class="label">METAR / ASOS text</div><div class="value" id="metarShort">—</div></div>
+
+    <div class="card wide">
+      <div class="label">Consolidated Meteogram (Rolling 8-Hour Window: 6-Hr History + 2-Hr Forecast)</div>
+      <div class="chart-container">
+        <canvas id="chartCombined"></canvas>
+      </div>
+    </div>
+
+    <div class="card wide">
+      <div class="label">Forecasts</div>
+      <div class="value" style="font-size:13px;">
+        <table style="width:100%; min-width:0;">
+          <thead>
+            <tr>
+              <th style="width:90px;">Horizon</th>
+              <th style="width:180px;">Temp</th>
+              <th style="width:140px;">Delta</th>
+              <th style="width:120px;">Trend</th>
+              <th style="width:160px;">Confidence</th>
+              <th>Drivers</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>30 min</td><td id="f30_temp">—</td><td id="f30_delta">—</td><td id="f30_trend">—</td><td id="f30_conf">—</td><td id="f30_drv">—</td></tr>
+            <tr><td>1 hour</td><td id="f60_temp">—</td><td id="f60_delta">—</td><td id="f60_trend">—</td><td id="f60_conf">—</td><td id="f60_drv">—</td></tr>
+            <tr><td>2 hours</td><td id="f120_temp">—</td><td id="f120_delta">—</td><td id="f120_trend">—</td><td id="f120_conf">—</td><td id="f120_drv">—</td></tr>
+            <tr><td>Today's High</td><td id="fHigh_temp">—</td><td id="fHigh_delta">—</td><td id="fHigh_trend">—</td><td id="fHigh_conf">—</td><td id="fHigh_drv">—</td></tr>
+          </tbody>
+        </table>
+        <div class="sub" style="margin-top:8px;" id="f_meta">—</div>
+      </div>
+    </div>
+
+    <div class="card wide">
+      <div class="label">Last 24 hours</div>
+      <div class="value" style="font-size:13px;">
+        <div style="opacity:.8; margin-bottom:8px;">Rows: <span id="rows">—</span></div>
+        <div class="tableWrap">
+          <table id="tbl">
+            <thead>
+              <tr><th>Time (ET)</th><th>Temp</th><th>Dew</th><th>Wind</th><th>Visibility</th><th>Ceiling</th><th>RH</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const PRIMARY_STATION = "KLGA1M";
+  const FALLBACK_STATION = "KJFK";
+  const REFRESH_MS = 5 * 60 * 1000;
+  const PRED_MS = 60 * 1000;
+
+  const el = (id) => document.getElementById(id);
+
+  let cCombined;
+  let globalChartData = { hist: [], pred: null, wu: [] };
+
+  function nowLocal() { return new Date().toLocaleString([], { hour12: false }); }
+  function scheduleNext() { el("nextFetch").textContent = new Date(Date.now() + REFRESH_MS).toLocaleTimeString([], { hour12:false }); }
+  function setStatus(text, ok=true) { const s=el("status"); s.textContent=text; s.className=ok?"ok":"bad"; }
+
+  const CT_TIME = new Intl.DateTimeFormat("en-US", { timeZone:"America/New_York", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false });
+  const CT_DAY = new Intl.DateTimeFormat("en-US", { timeZone:"America/New_York", weekday:"short", year:"numeric", month:"2-digit", day:"2-digit" });
+
+  function toCentralCompact(iso){ if(!iso) return "—"; return CT_TIME.format(new Date(iso)); }
+  function toCentralDayLabel(iso){ if(!iso) return "—"; return CT_DAY.format(new Date(iso)); }
+  function minutesOldIso(iso){ if(!iso) return null; const ms=Date.parse(iso); if(!Number.isFinite(ms)) return null; return Math.round((Date.now()-ms)/60000); }
+  function toCentralFromIso(iso, withZone=false){
+    if(!iso) return "—";
+    return new Date(iso).toLocaleString("en-US",{timeZone:"America/New_York",weekday:"short",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false,...(withZone?{timeZoneName:"short"}:{})});
+  }
+
+  function degToCompass16Words(deg){
+    const x=Number(deg); if(!Number.isFinite(x)) return "—";
+    const dirs=["North","North North East","North East","East North East","East","East South East","South East","South South East","South","South South West","South West","West South West","West","West North West","North West","North North West"];
+    return dirs[Math.round(((x%360)/22.5))%16];
+  }
+
+  function computeRH(tF, dF) {
+    if(!Number.isFinite(tF) || !Number.isFinite(dF)) return NaN;
+    const tC = (tF - 32) * 5/9;
+    const dC = (dF - 32) * 5/9;
+    const rh = 100 * Math.exp((17.625 * dC) / (243.04 + dC)) / Math.exp((17.625 * tC) / (243.04 + tC));
+    return Math.min(100, Math.round(rh));
+  }
+
+  async function fetchJson(url){
+    const res=await fetch(url,{cache:"no-store"});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  }
+  function synopticOk(j){ return j && j.SUMMARY && String(j.SUMMARY.RESPONSE_CODE)==="1" && j.STATION && j.STATION.length>0; }
+
+  async function getLatestWithFallback(){
+    try{ const j1=await fetchJson(`/api/hf_latest?station=${encodeURIComponent(PRIMARY_STATION)}`); if(synopticOk(j1)) return {j:j1,stationUsed:PRIMARY_STATION,feed:"Synoptic HF-ASOS"}; }catch{}
+    const j2=await fetchJson(`/api/hf_latest?station=${encodeURIComponent(FALLBACK_STATION)}`); if(synopticOk(j2)) return {j:j2,stationUsed:FALLBACK_STATION,feed:"Synoptic Fallback"};
+    throw new Error("No station data");
+  }
+
+  function pickLatestObs(obs, prefixes){
+    if(!obs) return null;
+    const keys=Object.keys(obs);
+    for(const pref of prefixes){
+      const k=keys.find(x=>x.startsWith(pref));
+      if(k && obs[k] && obs[k].value!==undefined && obs[k].date_time) return {key:k,...obs[k]};
+    }
+    return null;
+  }
+
+  function windFromLatest(obs){
+    const dir=pickLatestObs(obs,["wind_direction_value"]);
+    const spd=pickLatestObs(obs,["wind_speed_value"]);
+    const gst=pickLatestObs(obs,["wind_gust_value"]);
+    if(!spd) return "—";
+    const dirText=dir?degToCompass16Words(dir.value):"—";
+    const spdMph=Number(spd.value);
+    const gstMph=gst?Number(gst.value):null;
+    return Number.isFinite(spdMph)?`${dirText} ${Math.round(spdMph)} mph` + (Number.isFinite(gstMph)?` (gust ${Math.round(gstMph)} mph)`:""):"—";
+  }
+
+  function altFromLatest(obs){ const a=pickLatestObs(obs,["altimeter_value"]); if(!a) return "—"; const x=Number(a.value); return Number.isFinite(x)?`${x.toFixed(2)} inHg`:"—"; }
+  function visFromLatest(obs){ const v=pickLatestObs(obs,["visibility_value"]); if(!v) return "—"; const x=Number(v.value); return Number.isFinite(x)?`${x} mi`:"—"; }
+  function tempFromLatest(obs,prefix){ const t=pickLatestObs(obs,[prefix]); if(!t) return "—"; const x=Number(t.value); return Number.isFinite(x)?`${Math.round(x)}°F`:"—"; }
+  function metarFromLatest(obs){ const m=pickLatestObs(obs,["metar_value","raw_observation_value","raw_ob_value","metar"]); if(!m) return ""; return String(m.value||""); }
+
+  function ctParts(iso){
+    const parts=CT_TIME.formatToParts(new Date(iso));
+    const get=(t)=>parts.find(p=>p.type===t)?.value;
+    const hour=Number(get("hour")); const minute=Number(get("minute"));
+    const year=get("year"), month=get("month"), day=get("day");
+    return {hour,minute,dayKey:`${year}-${month}-${day}`};
+  }
+  
+  // UPDATED: Now marks 51 as the official minute for NYC/KLGA
+  function rowClassForMinute(minute){ if(minute===0) return "mark-hour"; if(minute===30) return "mark-half"; if(minute===51) return "mark-official"; return ""; }
+  function trendForTemps(curr,next){
+    if(!Number.isFinite(curr)||!Number.isFinite(next)) return {sym:"·",cls:"trend-flat",delta:""};
+    const diff=curr-next; if(Math.abs(diff)<0.25) return {sym:"→",cls:"trend-flat",delta:""};
+    return {sym:diff>0?"↑":"↓",cls:diff>0?"trend-up":"trend-down",delta:`${diff>0?"+":""}${diff.toFixed(1)}°`};
+  }
+
+  async function fetchHF_Latest(){
+    el("lastFetch").textContent=nowLocal();
+    scheduleNext();
+    setStatus("Fetching…",true);
+
+    const {j,stationUsed,feed}=await getLatestWithFallback();
+    el("stationBadge").textContent=`Station: ${stationUsed}`;
+    el("feedBadge").textContent=`Feed: ${feed}`;
+
+    const st=j.STATION[0];
+    const obs=st.OBSERVATIONS;
+    const timeCandidate=pickLatestObs(obs,["air_temp_value","wind_speed_value","altimeter_value","visibility_value"]);
+    const obsTime=timeCandidate?timeCandidate.date_time:null;
+
+    el("obsCt").textContent=obsTime?toCentralFromIso(obsTime,true):"—";
+    const age=minutesOldIso(obsTime);
+    el("age").textContent=Number.isFinite(age)?`${age} min`:"—";
+
+    el("wind").textContent=windFromLatest(obs);
+    el("alt").textContent=altFromLatest(obs);
+    el("vis").textContent=visFromLatest(obs);
+    el("temp").textContent=tempFromLatest(obs,"air_temp_value");
+    el("dew").textContent=tempFromLatest(obs,"dew_point_temperature_value");
+    const metar=metarFromLatest(obs);
+    el("metarShort").textContent=metar?metar.slice(0,90)+(metar.length>90?"…":""):"—";
+
+    setStatus("OK",true);
+  }
+
+  async function fetchPred(){
+    try{
+      const j = await fetchJson(`/api/predict/latest?station=${encodeURIComponent(PRIMARY_STATION)}`);
+      if(j.error){
+        for (const h of ["30","60","120","High"]) {
+          if (el(`f${h}_temp`)) el(`f${h}_temp`).textContent = "—";
+          if (el(`f${h}_delta`)) el(`f${h}_delta`).textContent = "—";
+          if (el(`f${h}_trend`)) el(`f${h}_trend`).textContent = "—";
+          if (el(`f${h}_conf`)) el(`f${h}_conf`).textContent = "—";
+          if (el(`f${h}_drv`)) el(`f${h}_drv`).textContent = "—";
+        }
+        el("f_meta").textContent = j.error;
+        return;
+      }
+
+      globalChartData.pred = j;
+
+      const now = Number(j.temp_now_f);
+      const ts = j.ts ? toCentralFromIso(j.ts, true) : "—";
+
+      function setRow(h){
+        const f = j.forecasts[String(h)];
+        if(!f){ return; }
+
+        const pred = Number(f.temp_pred_f);
+        const delta = Number(f.delta_pred_f);
+        const conf = Number(f.confidence);
+        const err = Number(f.exp_abs_err_f);
+
+        const arrow = delta > 0.25 ? "↑" : (delta < -0.25 ? "↓" : "→");
+        if(el(`f${h}_temp`)) el(`f${h}_temp`).textContent = `${Math.round(now)}°F → ${Math.round(pred)}°F`;
+        if(el(`f${h}_delta`)) el(`f${h}_delta`).textContent = `${arrow} ${delta>=0?"+":""}${delta.toFixed(2)}°F`;
+        if(el(`f${h}_trend`)) el(`f${h}_trend`).textContent = String(f.trend || "—").toUpperCase();
+        if(el(`f${h}_conf`)) el(`f${h}_conf`).textContent = `${Math.round(conf)} (±${err.toFixed(2)}°F)`;
+      }
+
+      setRow(30); setRow(60); setRow(120);
+
+      const driverLine = (j.drivers && j.drivers.length) ? j.drivers.join(", ") : "—";
+      
+      el("f30_drv").textContent = driverLine;
+      el("f60_drv").textContent = driverLine;
+      el("f120_drv").textContent = driverLine;
+
+      if (j.expected_high) {
+        const eh = j.expected_high;
+        const e_temp = Number(eh.temp_pred_f);
+        const e_delta = Number(eh.delta_pred_f);
+        const so_far = Number(eh.temp_high_so_far);
+
+        const arrow = e_delta > 0.25 ? "↑" : (e_delta < -0.25 ? "↓" : "→");
+        el("fHigh_temp").textContent = `${Math.round(now)}°F → ${Math.round(e_temp)}°F`;
+        el("fHigh_delta").textContent = `${arrow} ${e_delta>=0?"+":""}${e_delta.toFixed(2)}°F`;
+        el("fHigh_trend").textContent = "—"; 
+        
+        el("fHigh_conf").textContent = `(So far: ${so_far.toFixed(1)}°F)`;
+        el("fHigh_drv").textContent = driverLine;
+      }
+
+      el("f_meta").textContent = `Forecast computed: ${ts}`;
+    }catch(e){
+      el("f_meta").textContent = `Predict error: ${e.message || e}`;
+    }
+  }
+
+  async function fetchWU() {
+    let combinedPts = [];
+    const nowMs = Date.now();
+
+    // UPDATED: NYC coordinates
+    try {
+      const resOM = await fetch('https://api.open-meteo.com/v1/forecast?latitude=40.7769&longitude=-73.8740&hourly=temperature_2m&temperature_unit=fahrenheit&past_days=1&forecast_days=1&timeformat=unixtime');
+      if(resOM.ok) {
+          const jOM = await resOM.json();
+          if (jOM.hourly && jOM.hourly.time) {
+              for(let i=0; i<jOM.hourly.time.length; i++) {
+                  const tsMs = jOM.hourly.time[i] * 1000;
+                  if (tsMs < nowMs) {
+                      combinedPts.push({ x: tsMs, y: jOM.hourly.temperature_2m[i] });
+                  }
+              }
+          }
+      }
+    } catch(e) { console.warn("Open-Meteo fetch failed:", e); }
+
+    try {
+      const resWU = await fetch('/api/wu_forecast');
+      if (resWU.ok) {
+         const jWU = await resWU.json();
+         if (jWU.validTimeUtc && jWU.temperature) {
+            for(let i=0; i<jWU.validTimeUtc.length; i++) {
+               combinedPts.push({ x: jWU.validTimeUtc[i] * 1000, y: jWU.temperature[i] });
+            }
+         }
+      }
+    } catch(e) { console.warn("Wunderground fetch failed:", e); }
+
+    combinedPts.sort((a, b) => a.x - b.x);
+    globalChartData.wu = combinedPts;
+  }
+
+  function pickArrayKey(obs, candidates){
+    if(!obs) return null;
+    for(const c of candidates) if(Array.isArray(obs[c])) return c;
+    const keys=Object.keys(obs);
+    for(const cand of candidates){
+      const k=keys.find(x=>x.startsWith(cand));
+      if(k && Array.isArray(obs[k])) return k;
+    }
+    return null;
+  }
+
+  function renderHF_Table(timeseries){
+    const station = timeseries && timeseries.STATION && timeseries.STATION[0] ? timeseries.STATION[0] : null;
+    if(!station || !station.OBSERVATIONS) throw new Error("No timeseries data");
+    const obs = station.OBSERVATIONS;
+
+    const kTime = pickArrayKey(obs, ["date_time"]);
+    const kTemp = pickArrayKey(obs, ["air_temp", "air_temp_set_1", "air_temp_value"]);
+    const kDew  = pickArrayKey(obs, ["dew_point_temperature", "dew_point_temperature_set_1", "dew_point_temperature_value"]);
+    const kWspd = pickArrayKey(obs, ["wind_speed", "wind_speed_set_1", "wind_speed_value"]);
+    const kWdir = pickArrayKey(obs, ["wind_direction", "wind_direction_set_1", "wind_direction_value"]);
+    const kWgst = pickArrayKey(obs, ["wind_gust", "wind_gust_set_1", "wind_gust_value"]);
+    const kVis  = pickArrayKey(obs, ["visibility", "visibility_set_1", "visibility_value"]); 
+    const kCeil = pickArrayKey(obs, ["ceiling", "ceiling_set_1", "ceiling_value"]); 
+
+    const times = obs[kTime];
+    const n = times.length;
+    const idx = Array.from({length:n},(_,i)=>i).sort((a,b)=>Date.parse(times[b])-Date.parse(times[a]));
+
+    const rows=[];
+    const cutoff6h = Date.now() - (6 * 60 * 60 * 1000);
+    let histChartData = [];
+
+    for(const i of idx){
+      const iso = times[i];
+      if(!iso) continue;
+      const parts = ctParts(iso);
+      const ms = Date.parse(iso);
+
+      const tempNum = (kTemp && obs[kTemp][i]!=null) ? Number(obs[kTemp][i]) : NaN;
+      const dewNum  = (kDew  && obs[kDew][i]!=null) ? Number(obs[kDew][i])  : NaN;
+      const spd = (kWspd && obs[kWspd][i]!=null) ? Number(obs[kWspd][i]) : NaN;
+      const dir = (kWdir && obs[kWdir][i]!=null) ? Number(obs[kWdir][i]) : NaN;
+      const gst = (kWgst && obs[kWgst][i]!=null) ? Number(obs[kWgst][i]) : NaN;
+      const visRaw = (kVis && obs[kVis][i]!=null) ? Number(obs[kVis][i]) : NaN;
+      const ceilRaw = (kCeil && obs[kCeil][i]!=null) ? Number(obs[kCeil][i]) : NaN;
+
+      const wind = (Number.isFinite(spd)) ? `${degToCompass16Words(dir)} ${Math.round(spd)} mph` + (Number.isFinite(gst)?` (gust ${Math.round(gst)} mph)`:"") : "—";
+      const vis = Number.isFinite(visRaw) ? `${visRaw} mi` : "—";
+      const rhVal = computeRH(tempNum, dewNum);
+      const rhStr = Number.isFinite(rhVal) ? rhVal + "%" : "—";
+      const ceilStr = Number.isFinite(ceilRaw) ? `${ceilRaw} ft` : "Unl"; 
+
+      rows.push({iso,parts,tempNum,dewNum,wind,vis,rhStr,ceilStr});
+
+      if (ms >= cutoff6h && Number.isFinite(tempNum)) {
+        histChartData.push({ x: ms, temp: tempNum, dew: dewNum, spd: spd, rh: rhVal });
+      }
+    }
+
+    globalChartData.hist = histChartData.reverse();
+
+    const tbody = document.querySelector("#tbl tbody");
+    tbody.innerHTML="";
+    let lastDayKey=null;
+    let count=0;
+
+    for(let r=0;r<rows.length;r++){
+      const row=rows[r];
+
+      if(row.parts.dayKey!==lastDayKey){
+        lastDayKey=row.parts.dayKey;
+        const sep=document.createElement("tr");
+        sep.className="day-sep";
+        const td=document.createElement("td");
+        td.colSpan=7; 
+        td.textContent=toCentralDayLabel(row.iso);
+        sep.appendChild(td);
+        tbody.appendChild(sep);
+      }
+
+      const nextOlder = rows[r+1];
+      const trend = trendForTemps(row.tempNum, nextOlder ? nextOlder.tempNum : NaN);
+
+      const tr=document.createElement("tr");
+      const cls=rowClassForMinute(row.parts.minute);
+      if(cls) tr.classList.add(cls);
+
+      const timeText=toCentralCompact(row.iso);
+      const tempText=Number.isFinite(row.tempNum)?`${row.tempNum}°F`:"—";
+      const dewText=Number.isFinite(row.dewNum)?`${row.dewNum}°F`:"—";
+
+      const tdTime=document.createElement("td"); tdTime.textContent=timeText; tr.appendChild(tdTime);
+
+      const tdTemp=document.createElement("td");
+      const wrap=document.createElement("div"); wrap.className="tempWrap";
+      const arrow=document.createElement("span"); arrow.className=`trend ${trend.cls}`; arrow.textContent=trend.sym;
+      const val=document.createElement("span"); val.textContent=tempText;
+      wrap.appendChild(arrow); wrap.appendChild(val);
+      if(trend.delta){ const d=document.createElement("span"); d.className="delta"; d.textContent=trend.delta; wrap.appendChild(d); }
+      tdTemp.appendChild(wrap); tr.appendChild(tdTemp);
+
+      const tdDew=document.createElement("td"); tdDew.textContent=dewText; tr.appendChild(tdDew);
+      const tdWind=document.createElement("td"); tdWind.textContent=row.wind; tr.appendChild(tdWind);
+      const tdVis=document.createElement("td"); tdVis.textContent=row.vis; tr.appendChild(tdVis);
+      const tdCeil=document.createElement("td"); tdCeil.textContent=row.ceilStr; tr.appendChild(tdCeil); 
+      const tdRH=document.createElement("td"); tdRH.textContent=row.rhStr; tr.appendChild(tdRH);
+
+      tbody.appendChild(tr);
+      count++;
+    }
+    el("rows").textContent=String(count);
+  }
+
+  const officialLinePlugin = {
+    id: 'officialLinePlugin',
+    beforeDraw: (chart) => {
+      const ctx = chart.ctx;
+      const xAxis = chart.scales.x;
+      const yAxis = chart.scales.y;
+      const histData = chart.data.datasets.find(ds => ds.label === 'Observed Temp')?.data || [];
+      
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255, 215, 90, 0.6)'; 
+      
+      ctx.beginPath();
+      histData.forEach(d => {
+        const date = new Date(d.x);
+        // UPDATED: Now marks 51 as the official minute for NYC/KLGA
+        if (date.getMinutes() === 51) {
+          const xPos = xAxis.getPixelForValue(d.x);
+          if (xPos >= xAxis.left && xPos <= xAxis.right) {
+            ctx.moveTo(xPos, yAxis.top);
+            ctx.lineTo(xPos, yAxis.bottom);
+          }
+        }
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+
+  function updateChart() {
+    if (!globalChartData.hist.length || !globalChartData.pred) return;
+
+    const hist = globalChartData.hist;
+    const pred = globalChartData.pred;
+    const nowMs = Date.parse(pred.ts);
+    const cutoff6h = Date.now() - (6 * 60 * 60 * 1000);
+    const horizonEnd = nowMs + (120 * 60000);
+    
+    const histPoints = hist.map(d => ({ x: d.x, y: d.temp }));
+    const dewPoints = hist.map(d => ({ x: d.x, y: d.dew }));
+    const windPoints = hist.map(d => ({ x: d.x, y: d.spd }));
+    const rhPoints = hist.map(d => ({ x: d.x, y: d.rh })).filter(d => Number.isFinite(d.y));
+
+    const predPoints = [];
+    const upperPoints = [];
+    const lowerPoints = [];
+
+    if (pred.historical_120) {
+        const err120 = pred.forecasts["120"] ? pred.forecasts["120"].exp_abs_err_f : 2.0;
+
+        pred.historical_120.forEach(p => {
+            const ms = Date.parse(p.ts);
+            if (ms >= cutoff6h) {
+                predPoints.push({ x: ms, y: p.temp_pred_f });
+                if (ms >= nowMs) {
+                    upperPoints.push({ x: ms, y: p.temp_pred_f + err120 });
+                    lowerPoints.push({ x: ms, y: p.temp_pred_f - err120 });
+                }
+            }
+        });
+    }
+    
+    const wuPoints = [];
+    if (globalChartData.wu) {
+        globalChartData.wu.forEach(p => {
+            if (p.x >= cutoff6h && p.x <= horizonEnd + 3600000) { 
+                wuPoints.push(p);
+            }
+        });
+    }
+
+    const expectedHigh = pred.expected_high ? pred.expected_high.temp_pred_f : null;
+    const maxHorizon = 120;
+    const targetPoints = expectedHigh ? [
+      { x: histPoints[0]?.x || nowMs, y: expectedHigh },
+      { x: nowMs + (maxHorizon * 60000), y: expectedHigh }
+    ] : [];
+
+    const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+    const textColor = isDark ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.8)';
+
+    if (cCombined) cCombined.destroy();
+    
+    cCombined = new Chart(el('chartCombined').getContext('2d'), {
+      type: 'line',
+      data: {
+        datasets: [
+          { label: 'Wind Speed', data: windPoints, type: 'bar', backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', yAxisID: 'y1', order: 10, barPercentage: 1.0, categoryPercentage: 1.0 },
+          { label: 'Relative Humidity', data: rhPoints, borderColor: '#8b5cf6', tension: 0.1, pointRadius: 0, borderWidth: 1.5, yAxisID: 'y', order: 5 },
+          { label: 'Upper Bound', data: upperPoints, borderColor: 'transparent', backgroundColor: 'rgba(217, 119, 6, 0.15)', fill: '+1', pointRadius: 0, yAxisID: 'y', order: 6 },
+          { label: 'Lower Bound', data: lowerPoints, borderColor: 'transparent', pointRadius: 0, yAxisID: 'y', order: 7 },
+          { label: 'Wunderground', data: wuPoints, borderColor: '#9333ea', borderDash: [2, 2], tension: 0.4, pointRadius: 2, pointBackgroundColor: '#9333ea', borderWidth: 2, yAxisID: 'y', order: 1 },
+          { label: 'Your 2-Hr Forecast', data: predPoints, borderColor: '#d97706', borderDash: [5, 5], tension: 0.3, pointRadius: 0, borderWidth: 3, yAxisID: 'y', order: 2 },
+          { label: 'Observed Temp', data: histPoints, borderColor: '#2563eb', tension: 0.1, pointRadius: 0, borderWidth: 2.5, yAxisID: 'y', order: 3 },
+          { label: 'Dewpoint', data: dewPoints, borderColor: '#16a34a', tension: 0.1, pointRadius: 0, borderWidth: 1.5, yAxisID: 'y', order: 4 },
+          { label: 'Expected High', data: targetPoints, borderColor: '#dc2626', borderDash: [4, 4], borderWidth: 2, pointRadius: 0, yAxisID: 'y', order: 1 }
+        ]
+      },
+      options: { 
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { 
+          legend: { 
+            display: true, position: 'top', 
+            labels: { color: textColor, usePointStyle: true, boxWidth: 8, filter: (item) => !item.text.includes('Bound') } 
+          }
+        },
+        scales: {
+          x: { type: 'time', time: { unit: 'hour' }, grid: { color: gridColor }, ticks: { color: textColor } },
+          y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, callback: v => v + '°' }, title: { display: true, text: 'Temp (°F) & RH (%)', color: textColor } },
+          y1: { position: 'right', beginAtZero: true, suggestedMax: 30, grid: { display: false }, ticks: { color: textColor, callback: v => v + ' mph' }, title: { display: true, text: 'Wind Speed', color: textColor } }
+        }
+      },
+      plugins: [officialLinePlugin]
+    });
+  }
+
+  async function refreshAll(){
+    try{ await fetchHF_Latest(); }catch(e){ setStatus(`Latest error: ${e.message}`,false); }
+    try{
+      const j = await fetchJson(`/api/hf_96?station=${encodeURIComponent(PRIMARY_STATION)}`);
+      renderHF_Table(j);
+    }catch(e){
+      setStatus(`Timeseries error: ${e.message}`,false);
+    }
+    
+    await Promise.all([fetchPred(), fetchWU()]);
+    updateChart();
+  }
+
+  el("every").textContent = String(REFRESH_MS/60000);
+  el("everyPred").textContent = String(PRED_MS/60000);
+  el("refreshBtn").addEventListener("click", refreshAll);
+
+  refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+  setInterval(fetchPred, PRED_MS);
+</script>
+</body>
+</html>
