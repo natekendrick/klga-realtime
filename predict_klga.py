@@ -81,10 +81,36 @@ def main():
     row = df2.iloc[[-1]]
     out = {"ts": row["ts"].iloc[0].isoformat(), "temp_now_f": float(row["temp_f"].iloc[0]), "forecasts": {}}
     
+    baseline_maes = {30: 1.13, 60: 1.43, 120: 1.81}
     for h in m["horizons"]:
         reg = pickle.loads(base64.b64decode(m["regs"][str(h)]))
         delta = float(reg.predict(row[m["feature_cols"]])[0])
-        out["forecasts"][str(h)] = {"temp_pred_f": out["temp_now_f"] + delta, "delta_pred_f": delta, "exp_abs_err_f": 1.5, "trend": "flat", "confidence": 90}
+        
+        # 1. Calculate Dynamic Error
+        base_err = baseline_maes.get(h, 1.5)
+        # If the temperature has been swinging wildly in the last 15 mins, increase the expected error
+        volatility_penalty = float(row["temp_v_15"].iloc[0]) * 0.75 
+        dynamic_err = base_err + volatility_penalty
+        
+        # 2. Calculate Dynamic Confidence (0-100 scale)
+        # Base 100, subtract points based on the size of the dynamic error
+        confidence = max(0.0, min(100.0, 100.0 - (dynamic_err * 12)))
+        
+        # 3. Calculate Dynamic Trend
+        if delta > 0.5:
+            trend = "up"
+        elif delta < -0.5:
+            trend = "down"
+        else:
+            trend = "flat"
+            
+        out["forecasts"][str(h)] = {
+            "temp_pred_f": out["temp_now_f"] + delta, 
+            "delta_pred_f": delta, 
+            "exp_abs_err_f": round(dynamic_err, 2), 
+            "trend": trend, 
+            "confidence": round(confidence, 1)
+        }
 
     hist_df = df2.tail(480).copy()
     if not hist_df.empty and "120" in m["regs"]:
