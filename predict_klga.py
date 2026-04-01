@@ -7,7 +7,6 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 warnings.filterwarnings("ignore")
 
-# Automatically switches between Cloud Network and Local Network
 PORT = os.environ.get("PORT", "5177")
 BASE = f"http://127.0.0.1:{PORT}"
 LAT, LON = 40.7769, -73.8740
@@ -40,16 +39,14 @@ def process_station_df(obs, prefix=""):
     return df.set_index("ts").resample("1min").ffill(limit=15).reset_index().dropna(subset=[f"{prefix}temp_f"])
 
 def main():
-    with open("model_klga_quad.json", "r") as f: m = json.load(f)
+    with open("model_klga_tri.json", "r") as f: m = json.load(f)
     
     r_target = requests.get(f"{BASE}/api/hf_96", params={"station": m["station"]}, timeout=15)
     r_lead = requests.get(f"{BASE}/api/hf_96", params={"station": m["lead_station"]}, timeout=15)
-    r_coastal = requests.get(f"{BASE}/api/hf_96", params={"station": m["lake_station"]}, timeout=15)
     r_north = requests.get(f"{BASE}/api/hf_96", params={"station": m["north_station"]}, timeout=15)
     
     df = process_station_df(r_target.json()["STATION"][0]["OBSERVATIONS"])
     df = pd.merge(df, process_station_df(r_lead.json()["STATION"][0]["OBSERVATIONS"], prefix="kewr_"), on="ts", how="left")
-    df = pd.merge(df, process_station_df(r_coastal.json()["STATION"][0]["OBSERVATIONS"], prefix="kjfk_"), on="ts", how="left")
     df = pd.merge(df, process_station_df(r_north.json()["STATION"][0]["OBSERVATIONS"], prefix="kteb_"), on="ts", how="left")
     df = df.ffill().bfill()
     
@@ -64,7 +61,7 @@ def main():
     df["temp_lag_30_diff"] = df["temp_f"] - df["temp_f"].shift(30)
     df["temp_lag_60_diff"] = df["temp_f"] - df["temp_f"].shift(60)
     
-    for pfx in ["", "kewr_", "kjfk_", "kteb_"]:
+    for pfx in ["", "kewr_", "kteb_"]:
         spd = df[f"{pfx}wind_mph"].fillna(0)
         dir_rad = np.radians(df[f"{pfx}wind_dir"].fillna(0))
         df[f"{pfx}wind_u"] = spd * np.sin(dir_rad)
@@ -86,23 +83,14 @@ def main():
         reg = pickle.loads(base64.b64decode(m["regs"][str(h)]))
         delta = float(reg.predict(row[m["feature_cols"]])[0])
         
-        # 1. Calculate Dynamic Error
         base_err = baseline_maes.get(h, 1.5)
-        # If the temperature has been swinging wildly in the last 15 mins, increase the expected error
         volatility_penalty = float(row["temp_v_15"].iloc[0]) * 0.75 
         dynamic_err = base_err + volatility_penalty
-        
-        # 2. Calculate Dynamic Confidence (0-100 scale)
-        # Base 100, subtract points based on the size of the dynamic error
         confidence = max(0.0, min(100.0, 100.0 - (dynamic_err * 12)))
         
-        # 3. Calculate Dynamic Trend
-        if delta > 0.5:
-            trend = "up"
-        elif delta < -0.5:
-            trend = "down"
-        else:
-            trend = "flat"
+        if delta > 0.5: trend = "up"
+        elif delta < -0.5: trend = "down"
+        else: trend = "flat"
             
         out["forecasts"][str(h)] = {
             "temp_pred_f": out["temp_now_f"] + delta, 
@@ -126,7 +114,7 @@ def main():
     high_so_far = float(df_51["temp_f"].max()) if not df_51.empty else float(df_today["temp_f"].max())
     
     out["expected_high"] = {"temp_pred_f": max(high_so_far, out["temp_now_f"] + delta_high), "temp_high_so_far": high_so_far}
-    out["drivers"] = ["Quad-Station ML (KLGA + KEWR + KJFK + KTEB)"]
+    out["drivers"] = ["Tri-Station ML (KLGA + KEWR + KTEB)"]
     print(json.dumps(out))
 
 if __name__ == "__main__":
