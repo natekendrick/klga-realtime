@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Force the server to install your Node packages
 RUN npm install
+RUN npm install ws
 
 # Copy the rest of your dashboard files into the server
 COPY . .
