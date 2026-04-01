@@ -60,9 +60,44 @@
       h1 { font-size: 18px; }
       .value { font-size: 16px; }
     }
+/* --- NEW BANNER STYLES --- */
+    #alertBanner {
+      display: none; /* Hidden by default */
+      padding: 12px 20px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      text-align: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transition: all 0.3s ease;
+    }
+    #alertBanner.normal {
+      background-color: #f59e0b; /* Amber/Orange */
+      color: #fff;
+    }
+    #alertBanner.critical {
+      background-color: #b42318; /* Deep Red */
+      color: #fff;
+      animation: pulseAlert 2s infinite;
+    }
+    #alertBanner span.close-btn {
+      float: right;
+      cursor: pointer;
+      opacity: 0.8;
+    }
+    #alertBanner span.close-btn:hover {
+      opacity: 1;
+    }
+    @keyframes pulseAlert {
+      0% { box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.7); }
+      70% { box-shadow: 0 0 0 10px rgba(180, 35, 24, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(180, 35, 24, 0); }
+    }
   </style>
 </head>
 <body>
+  <div id="alertBanner"></div>
   <header>
     <div>
       <h1>
@@ -89,7 +124,7 @@
 
     <div class="card"><div class="label">Visibility</div><div class="value" id="vis">—</div></div>
     <div class="card"><div class="label">Dew point</div><div class="value" id="dew">—</div></div>
-    <div class="card"><div class="label">METAR / ASOS text</div><div class="value" id="metarShort">—</div></div>
+    <div class="card"><div class="label">WUnderground High of Day</div><div class="value" id="wuHigh">—</div></div>
 
     <div class="card wide">
       <div class="label">Consolidated Meteogram (Rolling 8-Hour Window: 6-Hr History + 2-Hr Forecast)</div>
@@ -216,7 +251,6 @@
   function altFromLatest(obs){ const a=pickLatestObs(obs,["altimeter_value"]); if(!a) return "—"; const x=Number(a.value); return Number.isFinite(x)?`${x.toFixed(2)} inHg`:"—"; }
   function visFromLatest(obs){ const v=pickLatestObs(obs,["visibility_value"]); if(!v) return "—"; const x=Number(v.value); return Number.isFinite(x)?`${x} mi`:"—"; }
   function tempFromLatest(obs,prefix){ const t=pickLatestObs(obs,[prefix]); if(!t) return "—"; const x=Number(t.value); return Number.isFinite(x)?`${Math.round(x)}°F`:"—"; }
-  function metarFromLatest(obs){ const m=pickLatestObs(obs,["metar_value","raw_observation_value","raw_ob_value","metar"]); if(!m) return ""; return String(m.value||""); }
 
   function ctParts(iso){
     const parts=CT_TIME.formatToParts(new Date(iso));
@@ -257,8 +291,6 @@
     el("vis").textContent=visFromLatest(obs);
     el("temp").textContent=tempFromLatest(obs,"air_temp_value");
     el("dew").textContent=tempFromLatest(obs,"dew_point_temperature_value");
-    const metar=metarFromLatest(obs);
-    el("metarShort").textContent=metar?metar.slice(0,90)+(metar.length>90?"…":""):"—";
 
     setStatus("OK",true);
   }
@@ -328,11 +360,13 @@
     }
   }
 
+// --- NEW: Stitched External Data Fetch (Open-Meteo for History + Wunderground for Future) ---
   async function fetchWU() {
     let combinedPts = [];
     const nowMs = Date.now();
 
-    // UPDATED: NYC coordinates
+    // 1. Fetch Open-Meteo for the past 6 hours (uses unixtime format for exact accuracy)
+    // NOTE: Coordinates updated for KLGA (LaGuardia)
     try {
       const resOM = await fetch('https://api.open-meteo.com/v1/forecast?latitude=40.7769&longitude=-73.8740&hourly=temperature_2m&temperature_unit=fahrenheit&past_days=1&forecast_days=1&timeformat=unixtime');
       if(resOM.ok) {
@@ -340,6 +374,7 @@
           if (jOM.hourly && jOM.hourly.time) {
               for(let i=0; i<jOM.hourly.time.length; i++) {
                   const tsMs = jOM.hourly.time[i] * 1000;
+                  // ONLY push points that happened before "now" to fill the historical gap
                   if (tsMs < nowMs) {
                       combinedPts.push({ x: tsMs, y: jOM.hourly.temperature_2m[i] });
                   }
@@ -348,18 +383,43 @@
       }
     } catch(e) { console.warn("Open-Meteo fetch failed:", e); }
 
+    // 2. Fetch Wunderground for the Future via Proxy & Extract High of Day
     try {
       const resWU = await fetch('/api/wu_forecast');
       if (resWU.ok) {
          const jWU = await resWU.json();
+         let wuHighToday = -Infinity;
+         
+         // Get the current date in Eastern Time to boundary-check the hourly forecast
+         const todayStr = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
+
          if (jWU.validTimeUtc && jWU.temperature) {
             for(let i=0; i<jWU.validTimeUtc.length; i++) {
-               combinedPts.push({ x: jWU.validTimeUtc[i] * 1000, y: jWU.temperature[i] });
+               const tsMs = jWU.validTimeUtc[i] * 1000;
+               combinedPts.push({ x: tsMs, y: jWU.temperature[i] });
+               
+               // Check if the forecasted hour is still "today" in NY
+               const forecastDayStr = new Date(tsMs).toLocaleDateString("en-US", { timeZone: "America/New_York" });
+               if (forecastDayStr === todayStr) {
+                   if (jWU.temperature[i] > wuHighToday) {
+                       wuHighToday = jWU.temperature[i];
+                   }
+               }
             }
          }
+         
+         // Update the new UI card
+         const wuHighEl = el("wuHigh");
+         if (wuHighEl) {
+             wuHighEl.textContent = wuHighToday !== -Infinity ? `${Math.round(wuHighToday)}°F` : "—";
+         }
       }
-    } catch(e) { console.warn("Wunderground fetch failed:", e); }
+    } catch(e) { 
+        console.warn("Wunderground fetch failed:", e); 
+        if(el("wuHigh")) el("wuHigh").textContent = "Error";
+    }
 
+    // Ensure array is chronologically sorted before handing to Chart.js
     combinedPts.sort((a, b) => a.x - b.x);
     globalChartData.wu = combinedPts;
   }
@@ -615,6 +675,40 @@
   el("refreshBtn").addEventListener("click", refreshAll);
 
   refreshAll();
+
+  // --- NEW: Listen for Push Stream Alerts (With Banner) ---
+  const alertSource = new EventSource('/api/stream_alerts');
+  const banner = document.getElementById('alertBanner');
+  
+  alertSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    const sign = data.diff > 0 ? "+" : "";
+    const msgText = `Temp shifted by ${sign}${data.diff}°F (Observed: ${data.newTemp}°F, Previous: ${data.oldTemp}°F) at HH:${String(data.minute).padStart(2, '0')}`;
+    
+    // Create the banner content with a click-to-dismiss 'X'
+    const closeHtml = `<span class="close-btn" onclick="document.getElementById('alertBanner').style.display='none'">✕</span>`;
+    
+    if (data.isNearOfficial) {
+      console.warn(`🚨 OFFICIAL MINUTE ALERT: ` + msgText);
+      setStatus(`CRITICAL SHIFT: ${sign}${data.diff}°F!`, false);
+      
+      banner.className = 'critical';
+      banner.innerHTML = `🚨 <strong>CRITICAL METAR SHIFT:</strong> ${msgText} ${closeHtml}`;
+      banner.style.display = 'block';
+      
+      refreshAll(); 
+    } else {
+      console.log(`⚠️ TEMP SHIFT: ` + msgText);
+      setStatus(`Recent Shift: ${sign}${data.diff}°F`, true);
+      
+      banner.className = 'normal';
+      banner.innerHTML = `⚠️ <strong>TEMP UPDATE:</strong> ${msgText} ${closeHtml}`;
+      banner.style.display = 'block';
+      
+      refreshAll(); 
+    }
+  };
+
   setInterval(refreshAll, REFRESH_MS);
   setInterval(fetchPred, PRED_MS);
 </script>

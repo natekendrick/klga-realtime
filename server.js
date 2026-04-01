@@ -1,6 +1,7 @@
 import express from "express";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import WebSocket from "ws";
 
 const app = express();
 const PORT = process.env.PORT || 5177;
@@ -34,6 +35,110 @@ function synopticTimeseriesUrl({ stid, recentMinutes }) {
 function synopticLatestUrl({ stid }) {
   return `https://api.synopticdata.com/v2/stations/latest?stid=${encodeURIComponent(stid)}&hfmetars=1&within=180&units=english,speed|mph&showemptyvars=1&token=${encodeURIComponent(SYNOPTIC_TOKEN)}`;
 }
+
+// --- PUSH STREAMING & SSE LOGIC ---
+let lastTemp = null;
+let sseClients = [];
+
+function broadcastAlert(alertData) {
+  const payload = `data: ${JSON.stringify(alertData)}\n\n`;
+  sseClients.forEach(client => client.write(payload));
+}
+
+function parseSynopticDate(d) {
+  const standardDate = new Date(d);
+  if (!isNaN(standardDate.getTime())) {
+    return standardDate;
+  }
+  
+  if (typeof d === 'string' && d.length >= 12) {
+    return new Date(Date.UTC(
+      d.substring(0,4), parseInt(d.substring(4,6))-1, d.substring(6,8), 
+      d.substring(8,10), d.substring(10,12)
+    ));
+  }
+  
+  return null; 
+}
+
+function connectPushStream() {
+  const STREAM_URL = `wss://push.synopticdata.com/feed/${SYNOPTIC_TOKEN}/?stid=KLGA1M&vars=air_temp&units=english&rewind=60`;
+  const ws = new WebSocket(STREAM_URL);
+
+  ws.on('open', () => console.log('✅ Connected to Synoptic Push Stream'));
+
+  ws.on('message', (message) => {
+    try {
+      const payload = JSON.parse(message.toString());
+      
+      if (payload.type !== 'data') {
+        console.log('📡 Synoptic Server Message:', payload);
+      }
+      
+      if (payload.type === 'data') {
+        payload.data.forEach(ob => {
+          if (ob.sensor === 'air_temp') {
+            const currentTemp = parseFloat(ob.value);
+            const obsTime = parseSynopticDate(ob.date);
+            
+            if (!obsTime) {
+              console.warn('⚠️ Received unparseable date from stream:', ob.date);
+              return; 
+            }
+
+            const minute = obsTime.getMinutes();
+            
+            if (lastTemp !== null) {
+              const diff = currentTemp - lastTemp;
+              
+              if (Math.abs(diff) >= 0.5) {
+                const isNearOfficial = (minute >= 46 && minute <= 56);
+                
+                broadcastAlert({
+                  ts: obsTime.toISOString(),
+                  minute: minute,
+                  oldTemp: lastTemp,
+                  newTemp: currentTemp,
+                  diff: parseFloat(diff.toFixed(2)),
+                  isNearOfficial
+                });
+              }
+            }
+            lastTemp = currentTemp;
+          }
+        });
+      }
+    } catch (err) {
+      console.error('WebSocket parsing error:', err);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    const reasonText = reason.toString() || "No reason provided";
+    console.log(`❌ Synoptic stream closed. Code: ${code}, Reason: ${reasonText}`);
+    console.log('Reconnecting in 5s...');
+    setTimeout(connectPushStream, 5000);
+  });
+  
+  ws.on('error', (err) => {
+    console.error('🚨 WebSocket Error:', err);
+  });
+}
+
+connectPushStream();
+
+app.get('/api/stream_alerts', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  
+  sseClients.push(res);
+  
+  req.on('close', () => {
+    sseClients = sseClients.filter(c => c !== res);
+  });
+});
+// ----------------------------------
 
 app.get("/api/hf_latest", async (req, res) => {
   const stid = (req.query.station || "KLGA1M").toString().toUpperCase();
