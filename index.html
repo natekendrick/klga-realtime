@@ -65,9 +65,10 @@
       h1 { font-size: 18px; }
       .value { font-size: 16px; }
     }
-/* --- NEW BANNER STYLES --- */
+
+    /* --- NEW BANNER STYLES --- */
     #alertBanner {
-      display: none; /* Hidden by default */
+      display: none;
       padding: 12px 20px;
       margin-bottom: 20px;
       border-radius: 8px;
@@ -77,23 +78,10 @@
       box-shadow: 0 4px 12px rgba(0,0,0,0.15);
       transition: all 0.3s ease;
     }
-    #alertBanner.normal {
-      background-color: #f59e0b; /* Amber/Orange */
-      color: #fff;
-    }
-    #alertBanner.critical {
-      background-color: #b42318; /* Deep Red */
-      color: #fff;
-      animation: pulseAlert 2s infinite;
-    }
-    #alertBanner span.close-btn {
-      float: right;
-      cursor: pointer;
-      opacity: 0.8;
-    }
-    #alertBanner span.close-btn:hover {
-      opacity: 1;
-    }
+    #alertBanner.normal { background-color: #f59e0b; color: #fff; }
+    #alertBanner.critical { background-color: #b42318; color: #fff; animation: pulseAlert 2s infinite; }
+    #alertBanner span.close-btn { float: right; cursor: pointer; opacity: 0.8; }
+    #alertBanner span.close-btn:hover { opacity: 1; }
     @keyframes pulseAlert {
       0% { box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.7); }
       70% { box-shadow: 0 0 0 10px rgba(180, 35, 24, 0); }
@@ -124,7 +112,14 @@
 
   <div class="grid">
     <div class="card"><div class="label">Wind</div><div class="value" id="wind">—</div></div>
-    <div class="card"><div class="label">Temperature</div><div class="value" id="temp">—</div></div>
+    
+    <div class="card">
+      <div class="label">Temperature</div>
+      <div class="value" id="temp">—</div>
+      <div class="sub" id="officialMetarText" style="color: #2563eb; font-weight: 600;">—</div>
+      <div class="sub" id="unofficialMetarText" style="opacity: 0.85;">—</div>
+    </div>
+
     <div class="card"><div class="label">Altimeter</div><div class="value" id="alt">—</div></div>
 
     <div class="card"><div class="label">Visibility</div><div class="value" id="vis">—</div></div>
@@ -265,7 +260,6 @@
     return {hour,minute,dayKey:`${year}-${month}-${day}`};
   }
   
-  // UPDATED: Now marks 51 as the official minute for NYC/KLGA
   function rowClassForMinute(minute){ if(minute===0) return "mark-hour"; if(minute===30) return "mark-half"; if(minute===51) return "mark-official"; return ""; }
   function trendForTemps(curr,next){
     if(!Number.isFinite(curr)||!Number.isFinite(next)) return {sym:"·",cls:"trend-flat",delta:""};
@@ -365,13 +359,10 @@
     }
   }
 
-// --- NEW: Stitched External Data Fetch (Open-Meteo for History + Wunderground for Future) ---
   async function fetchWU() {
     let combinedPts = [];
     const nowMs = Date.now();
 
-    // 1. Fetch Open-Meteo for the past 6 hours (uses unixtime format for exact accuracy)
-    // NOTE: Coordinates updated for KLGA (LaGuardia)
     try {
       const resOM = await fetch('https://api.open-meteo.com/v1/forecast?latitude=40.7769&longitude=-73.8740&hourly=temperature_2m&temperature_unit=fahrenheit&past_days=1&forecast_days=1&timeformat=unixtime');
       if(resOM.ok) {
@@ -379,7 +370,6 @@
           if (jOM.hourly && jOM.hourly.time) {
               for(let i=0; i<jOM.hourly.time.length; i++) {
                   const tsMs = jOM.hourly.time[i] * 1000;
-                  // ONLY push points that happened before "now" to fill the historical gap
                   if (tsMs < nowMs) {
                       combinedPts.push({ x: tsMs, y: jOM.hourly.temperature_2m[i] });
                   }
@@ -388,14 +378,12 @@
       }
     } catch(e) { console.warn("Open-Meteo fetch failed:", e); }
 
-    // 2. Fetch Wunderground for the Future via Proxy & Extract High of Day
     try {
       const resWU = await fetch('/api/wu_forecast');
       if (resWU.ok) {
          const jWU = await resWU.json();
          let wuHighToday = -Infinity;
          
-         // Get the current date in Eastern Time to boundary-check the hourly forecast
          const todayStr = new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" });
 
          if (jWU.validTimeUtc && jWU.temperature) {
@@ -403,7 +391,6 @@
                const tsMs = jWU.validTimeUtc[i] * 1000;
                combinedPts.push({ x: tsMs, y: jWU.temperature[i] });
                
-               // Check if the forecasted hour is still "today" in NY
                const forecastDayStr = new Date(tsMs).toLocaleDateString("en-US", { timeZone: "America/New_York" });
                if (forecastDayStr === todayStr) {
                    if (jWU.temperature[i] > wuHighToday) {
@@ -413,7 +400,6 @@
             }
          }
          
-         // Update the new UI card
          const wuHighEl = el("wuHigh");
          if (wuHighEl) {
              wuHighEl.textContent = wuHighToday !== -Infinity ? `${Math.round(wuHighToday)}°F` : "—";
@@ -424,9 +410,33 @@
         if(el("wuHigh")) el("wuHigh").textContent = "Error";
     }
 
-    // Ensure array is chronologically sorted before handing to Chart.js
     combinedPts.sort((a, b) => a.x - b.x);
     globalChartData.wu = combinedPts;
+  }
+
+  // --- NEW: AWC Proxy Fetcher ---
+  async function fetchOfficialMetar() {
+    const metarEl = el("officialMetarText");
+    try {
+      const res = await fetch(`/api/awc_metar?station=${encodeURIComponent(PRIMARY_STATION)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      
+      if (data && data.length > 0) {
+        const obs = data[0];
+        const exactC = obs.temp; 
+        const exactF = (exactC * 9/5) + 32;
+        const awDisplayF = Math.round(exactF);
+        
+        metarEl.textContent = `Official METAR: ${awDisplayF}°F (Exact: ${exactF.toFixed(1)}°F)`;
+        metarEl.style.color = "#2563eb"; 
+      } else {
+        metarEl.textContent = "AWC API returned no data.";
+      }
+    } catch (e) {
+      console.warn("Failed to fetch official METAR:", e);
+      metarEl.textContent = "Error fetching METAR";
+    }
   }
 
   function pickArrayKey(obs, candidates){
@@ -543,6 +553,29 @@
     el("rows").textContent=String(count);
   }
 
+  // --- NEW: Live 5-Min Rolling Average ---
+  function calculateRollingMetar() {
+    const rollingEl = el("unofficialMetarText");
+    if (!globalChartData.hist || globalChartData.hist.length === 0) {
+      rollingEl.textContent = "Rolling Avg: Waiting for data...";
+      return;
+    }
+
+    const recentPoints = globalChartData.hist.slice(-5).filter(d => Number.isFinite(d.temp));
+
+    if (recentPoints.length > 0) {
+      const avgF = recentPoints.reduce((sum, d) => sum + d.temp, 0) / recentPoints.length;
+      
+      const exactC = (avgF - 32) * (5 / 9);
+      const roundedC = Math.round(exactC);
+      const developingMetarF = (roundedC * 9/5) + 32;
+
+      rollingEl.textContent = `Live 5-Min Avg: ~${Math.round(developingMetarF)}°F (Raw: ${avgF.toFixed(1)}°F)`;
+    } else {
+      rollingEl.textContent = "Live 5-Min Avg: No recent data";
+    }
+  }
+
   const officialLinePlugin = {
     id: 'officialLinePlugin',
     beforeDraw: (chart) => {
@@ -558,7 +591,6 @@
       ctx.beginPath();
       histData.forEach(d => {
         const date = new Date(d.x);
-        // UPDATED: Now marks 51 as the official minute for NYC/KLGA
         if (date.getMinutes() === 51) {
           const xPos = xAxis.getPixelForValue(d.x);
           if (xPos >= xAxis.left && xPos <= xAxis.right) {
@@ -667,11 +699,15 @@
     try{
       const j = await fetchJson(`/api/hf_96?station=${encodeURIComponent(PRIMARY_STATION)}`);
       renderHF_Table(j);
+      
+      // Calculate the rolling 5-minute avg now that the table has fresh data
+      calculateRollingMetar(); 
     }catch(e){
       setStatus(`Timeseries error: ${e.message}`,false);
     }
     
-    await Promise.all([fetchPred(), fetchWU()]);
+    // Fetch AWC proxy concurrently with the other endpoints
+    await Promise.all([fetchPred(), fetchWU(), fetchOfficialMetar()]);
     updateChart();
   }
 
@@ -681,7 +717,7 @@
 
   refreshAll();
 
-  // --- NEW: Listen for Push Stream Alerts (With Banner) ---
+  // --- Listen for Push Stream Alerts (With Banner) ---
   const alertSource = new EventSource('/api/stream_alerts');
   const banner = document.getElementById('alertBanner');
   
@@ -690,7 +726,6 @@
     const sign = data.diff > 0 ? "+" : "";
     const msgText = `Temp shifted by ${sign}${data.diff}°F (Observed: ${data.newTemp}°F, Previous: ${data.oldTemp}°F) at HH:${String(data.minute).padStart(2, '0')}`;
     
-    // Create the banner content with a click-to-dismiss 'X'
     const closeHtml = `<span class="close-btn" onclick="document.getElementById('alertBanner').style.display='none'">✕</span>`;
     
     if (data.isNearOfficial) {

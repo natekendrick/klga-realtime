@@ -209,6 +209,26 @@ app.get("/api/predict/latest", async (req, res) => {
   }
 });
 
+// --- NEW: AWC METAR Proxy Endpoint ---
+app.get("/api/awc_metar", async (req, res) => {
+  // Strip the '1M' so we ask AWC for 'KLGA'
+  const stid = (req.query.station || "KLGA").toString().toUpperCase().replace("1M", "");
+  const url = `https://aviationweather.gov/api/data/metar?ids=${stid}&format=json`;
+  
+  try {
+    const { status, ok, body } = await getCachedOrFetch(`awc_metar_${stid}`, url, { 
+      "User-Agent": "Mozilla/5.0 (Node.js backend proxy)" 
+    });
+    if (!ok) return res.status(status).send(body);
+
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(body);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Open http://localhost:${PORT}`);
 });
